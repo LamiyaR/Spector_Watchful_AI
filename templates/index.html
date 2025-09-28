@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gender Detector • YOLOv8 vs Haar Cascade</title>
+    <script src="https://cdn.tailwindcss.com">
+      async function showError(msg) {
+        const el = document.getElementById("alert");
+        el.textContent = msg;
+        el.classList.remove("hidden");
+      }
+
+      // On load, ping health to surface backend issues (like missing weights/torch)
+      (async () => {
+        try {
+          const res = await fetch("/health");
+          const j = await res.json();
+          if (!j.ok) throw new Error(j.error || "Health check failed");
+          const info = j.info;
+          if (!info.ultralytics_installed) {
+            showError("Ultralytics not installed. Run: pip install -r requirements.txt (and install PyTorch separately).");
+          } else if (!info.models.pt.length) {
+            showError("No YOLO .pt file found in ./models. Place your trained weights there (e.g., best.pt).");
+          }
+          if (!info.models.xml.length) {
+            // Non-fatal for YOLO; warn for Haar
+            console.warn("No Haar .xml found in ./models");
+          }
+        } catch (e) {
+          console.warn(e);
+        }
+      })();
+
+    </script>
+  </head>
+  <body class="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-slate-100">
+    <div class="max-w-6xl mx-auto px-6 py-12">
+      <div id="alert" class="hidden mb-4 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-100 px-4 py-3"></div>
+      <header class="mb-10">
+        <h1 class="text-3xl sm:text-4xl font-bold tracking-tight">Real‑Time Gender / Face Detection</h1>
+        <p class="text-slate-300 mt-2">Compare your <span class="font-semibold">YOLOv8</span> model against <span class="font-semibold">Haar Cascade</span>. Upload an image or use your webcam.</p>
+      </header>
+
+      <section class="grid md:grid-cols-3 gap-6">
+        <div class="md:col-span-1 space-y-6">
+          <div class="bg-slate-800/60 rounded-2xl p-5 shadow-lg ring-1 ring-white/5">
+            <h2 class="text-lg font-semibold mb-3">Model</h2>
+            <div class="space-y-3">
+              <label class="flex items-center gap-3">
+                <input type="radio" name="model" value="yolo" class="w-4 h-4" checked />
+                <span>YOLOv8</span>
+              </label>
+              <label class="flex items-center gap-3">
+                <input type="radio" name="model" value="haar" class="w-4 h-4" />
+                <span>Haar Cascade (faces)</span>
+              </label>
+              <div class="text-xs text-slate-400 pt-2">
+                <div><b>YOLO weights:</b> <span id="yoloWeights"></span></div>
+                <div><b>Haar files:</b> <span id="haarFiles"></span></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="bg-slate-800/60 rounded-2xl p-5 shadow-lg ring-1 ring-white/5">
+            <h2 class="text-lg font-semibold mb-3">Upload Image</h2>
+            <form id="imageForm" class="space-y-3">
+              <input id="imageInput" type="file" accept="image/*" class="block w-full text-sm text-slate-300 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-sm file:font-semibold file:bg-indigo-500/90 file:text-white hover:file:bg-indigo-500/100 transition" />
+              <button class="w-full py-2 rounded-xl bg-indigo-500 hover:bg-indigo-600 transition font-semibold">Detect</button>
+            </form>
+          </div>
+
+          <div class="bg-slate-800/60 rounded-2xl p-5 shadow-lg ring-1 ring-white/5">
+            <h2 class="text-lg font-semibold mb-3">Webcam</h2>
+            <div class="space-y-3">
+              <video id="cam" autoplay playsinline class="w-full rounded-xl bg-black/40 aspect-video"></video>
+              <div class="flex gap-3">
+                <button id="startCam" class="flex-1 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 transition font-semibold">Start</button>
+                <button id="snap" class="flex-1 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-600 transition font-semibold">Snapshot</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="md:col-span-2 space-y-6">
+          <div class="bg-slate-800/60 rounded-2xl p-5 shadow-lg ring-1 ring-white/5">
+            <h2 class="text-lg font-semibold mb-3">Result</h2>
+            <div id="counts" class="text-sm text-slate-300 mb-3">No results yet.</div>
+            <img id="output" class="w-full rounded-xl border border-white/10" alt="Annotated output"/>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      const yoloWeights = {{ yolo_weights|tojson }};
+      const haarFiles = {{ haar_files|tojson }};
+      document.getElementById("yoloWeights").textContent = yoloWeights.length ? yoloWeights.join(", ") : "None found";
+      document.getElementById("haarFiles").textContent = haarFiles.length ? haarFiles.join(", ") : "None found";
+
+      
+      function supportsCamera() {
+        const legacy = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+        return (navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === "function") || legacy;
+      }
+
+      function getUserMediaPolyfill(constraints) {
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+          return navigator.mediaDevices.getUserMedia(constraints);
+        }
+        const legacy = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+        if (legacy) {
+          return new Promise((resolve, reject) => legacy.call(navigator, constraints, resolve, reject));
+        }
+        return Promise.reject(new Error("getUserMedia not supported in this browser"));
+      }
+
+      function insecureContextHint() {
+        const isLocalhost = location.hostname === "localhost" || location.hostname === "127.0.0.1";
+        if (!window.isSecureContext && !isLocalhost) {
+          return "Camera requires a secure context. Run the app on https:// or use http://localhost.";
+        }
+        return null;
+      }
+
+      function currentModel() {
+        return document.querySelector('input[name="model"]:checked').value;
+      }
+
+      // Image upload flow
+      document.getElementById("imageForm").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const fileInput = document.getElementById("imageInput");
+        if (!fileInput.files.length) return alert("Please choose an image");
+        const fd = new FormData();
+        fd.append("image", fileInput.files[0]);
+        fd.append("model", currentModel());
+        const res = await fetch("/detect-image", { method: "POST", body: fd });
+        if (res.headers.get("content-type")?.includes("image/jpeg")) {
+          const blob = await res.blob();
+          document.getElementById("output").src = URL.createObjectURL(blob);
+          document.getElementById("counts").textContent = "Processed image.";
+        } else {
+          const j = await res.json();
+          showError(j.error || "Detection failed");
+        }
+      });
+
+      // Webcam
+      const video = document.getElementById("cam");
+      const startBtn = document.getElementById("startCam");
+      const snapBtn = document.getElementById("snap");
+      let stream = null;
+
+      startBtn.onclick = async () => {
+        try {
+          stream = await (navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
+            ? navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: {ideal: 1280}, height: {ideal: 720} }, audio: false })
+            : Promise.reject(new Error("Camera API not supported in this browser"))
+          video.srcObject = stream;
+        } catch (e) {
+          alert("Failed to access camera: " + e.message);
+        }
+      };
+
+      snapBtn.onclick = async () => {
+        if (!stream) return alert("Start the webcam first.");
+        const canvas = document.createElement("canvas");
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(video, 0, 0);
+        const blob = await new Promise(r => canvas.toBlob(r, "image/jpeg", 0.9));
+        const fd = new FormData();
+        fd.append("frame", blob, "frame.jpg");
+        fd.append("model", currentModel());
+        const res = await fetch("/detect-frame", { method: "POST", body: fd });
+        const j = await res.json();
+        if (j.ok) {
+          document.getElementById("output").src = "data:image/jpeg;base64," + j.image_base64;
+          const pairs = Object.entries(j.counts || {});
+          document.getElementById("counts").textContent = pairs.length ? pairs.map(([k,v]) => k + ": " + v).join(" • ") : "No detections";
+        } else {
+          showError(j.error || "Detection failed");
+        }
+      };
+    
+      async function showError(msg) {
+        const el = document.getElementById("alert");
+        el.textContent = msg;
+        el.classList.remove("hidden");
+      }
+
+      // On load, ping health to surface backend issues (like missing weights/torch)
+      (async () => {
+        try {
+          const res = await fetch("/health");
+          const j = await res.json();
+          if (!j.ok) throw new Error(j.error || "Health check failed");
+          const info = j.info;
+          if (!info.ultralytics_installed) {
+            showError("Ultralytics not installed. Run: pip install -r requirements.txt (and install PyTorch separately).");
+          } else if (!info.models.pt.length) {
+            showError("No YOLO .pt file found in ./models. Place your trained weights there (e.g., best.pt).");
+          }
+          if (!info.models.xml.length) {
+            // Non-fatal for YOLO; warn for Haar
+            console.warn("No Haar .xml found in ./models");
+          }
+        } catch (e) {
+          console.warn(e);
+        }
+      })();
+
+    </script>
+  </body>
+</html>
