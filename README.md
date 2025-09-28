@@ -1,7 +1,5 @@
 # Gender Detector Web App (YOLOv8 vs Haar Cascade)
 
-A chic, interactive Flask website to compare your YOLOv8 model with a Haar Cascade face detector.
-It supports **image uploads** and **webcam snapshots**.
 
 ## What's included
 - `app.py` — Flask server with two endpoints:
